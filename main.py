@@ -1,56 +1,80 @@
 import os
+import gc
 from flask import Flask, request, jsonify
 import ezdxf
+from ezdxf.lldxf import tagger
 import re
 import math
 import cloudconvert
-import gc # Hafıza temizliği için Garbage Collector
 
 app = Flask(__name__)
 
-# --- AYARLAR ---
-# API KEY'İNİ BURAYA YAPIŞTIRMAYI UNUTMA!
+# ==========================================
+# 🔑 AYARLAR
+# ==========================================
 CLOUDCONVERT_API_KEY = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJhdWQiOiIxIiwianRpIjoiYWQzMmEyODgwOGUwZjFkYjI0YTU1Zjk1YTM1NjE5NjA2YTg3MjRjNDY0Yjc4ZTQ1Y2NhNGFlY2E0NTg1NGM0MTc1MmQ3YmM1MjZkMjQ5NjEiLCJpYXQiOjE3NjU1NDYzNTIuNzIxNDQ1LCJuYmYiOjE3NjU1NDYzNTIuNzIxNDQ3LCJleHAiOjQ5MjEyMTk5NTIuNzEzNDM2LCJzdWIiOiI3MzcxNzA2MyIsInNjb3BlcyI6WyJ0YXNrLndyaXRlIiwidGFzay5yZWFkIiwidXNlci5yZWFkIl19.Lr7QFvOfWu2qss8lt3JKRtQrUGP1LWXAPQG5gm7GmNtqdMQ9Nu3TUAsNIn1LhLqd46vq8tqpXdW-OOB4_dh_sAG1vWsZeGWBYxFxaeQJdDuZdpJ5Bc2NntvYrmfTHK8XTjan83NpibvgCz9Aviho2rv7lLciumaeuEr2rqmnP12jvdIKzLoDOCLPyd1WWu0_LWmQdVZyEGMtoon6MxWnxbMgmVh-Lfn0I7AyvWlgYm85IeL4ioLQBjebMhFqmYNfp5ZJy6VtmmEgxMQhZftYwsaPtp9bBb7gfUBmz_Gj9IYSgr7wWbMVjjHul_JAqgEl7adcaeK3JdjigtaVc6MjvZEqVaUetdCwMxqqcrufkNFYaE0NfjfOSjcO_gX5xn3xulMerzR92nzsGfk8LldRBtnTaACjEfMP8-noHZvpMzCMWBtvrP2FboYO06FUaT9hr8rRKwFrkIAeA516WNYwwdAeFSLiLpTzCZdRSweir8UKl3TtiA7s9Gk6F7zgocgQiIOSt4Hz7HXFVj--v3XuD8dNyZSQsv-niqzK8-CzFw7CDewYH57Vp_JgFv36yn117rsp_G4dw9COfmdS4l6Au27BHVmER7aG-2C2FTnulyqIhbRgidPjKClo_mMmgxTkNFRR1JpLiBtpsGYhdiDmQ7RseVyQYABMUo415cca3Yw" 
 
 cloudconvert.configure(api_key=CLOUDCONVERT_API_KEY)
 
-# --- HESAPLAMA MOTORU ---
+# ==========================================
+# 🏗️ HESAPLAMA MOTORU (Düşük RAM Modu)
+# ==========================================
 class RebarExtractor:
     def __init__(self):
+        # Regex: "20 Ø12" veya "Ø14/15" gibi desenleri yakalar
         self.rebar_pattern = re.compile(r'(\d+)\s*[Ø|Q|q|fi]\s*(\d+)(?:\s*L\s*=\s*(\d+))?', re.IGNORECASE)
 
-    def parse_dxf(self, file_path):
+    def parse_dxf_stream(self, file_path):
+        """
+        Dosyayı tamamını RAM'e yüklemeden (Stream) okur.
+        Bu yöntem büyük dosyalarda bile sunucuyu çökertmez.
+        """
+        extracted_data = []
+        
         try:
-            # SADECE GEREKLİ KATMANLARI OKU (Hafıza Tasarrufu İçin)
-            # DXF dosyasını okurken hafızayı şişirmemek için önlemler
-            doc = ezdxf.readfile(file_path)
-            msp = doc.modelspace()
-            extracted_data = []
-            
-            # Sadece TEXT ve MTEXT objelerini sorgula, diğerlerini belleğe alma
-            for entity in msp.query('TEXT MTEXT'):
-                text_content = entity.dxf.text
-                match = self.rebar_pattern.search(text_content)
-                if match:
-                    count = int(match.group(1))
-                    diameter = int(match.group(2))
-                    length = int(match.group(3)) if match.group(3) else 0 
+            # Dosyayı metin akışı olarak aç (Binary değil)
+            with open(file_path, 'rt', encoding='cp1252', errors='ignore') as fp:
+                # Ezdxf'in düşük seviye tag okuyucusu
+                tag_stream = tagger.low_level_tagger(fp)
+                
+                in_text_entity = False
+                
+                for tag in tag_stream:
+                    code = tag.code
+                    value = tag.value
                     
-                    extracted_data.append({
-                        "raw_text": text_content,
-                        "count": count,
-                        "diameter": diameter,
-                        "length_cm": length
-                    })
-            
-            # İş bitince belleği temizle
-            del doc
-            del msp
-            gc.collect()
+                    # 0 Grubu: Obje Başlangıcı (TEXT veya MTEXT mi?)
+                    if code == 0:
+                        if value == 'TEXT' or value == 'MTEXT':
+                            in_text_entity = True
+                        else:
+                            in_text_entity = False
+                    
+                    # 1 Grubu: Metin İçeriği
+                    if in_text_entity and code == 1:
+                        # Regex ile kontrol et
+                        if isinstance(value, str):
+                            match = self.rebar_pattern.search(value)
+                            if match:
+                                try:
+                                    count = int(match.group(1))
+                                    diameter = int(match.group(2))
+                                    # Uzunluk varsa al, yoksa 0
+                                    length = int(match.group(3)) if match.group(3) else 0
+                                    
+                                    extracted_data.append({
+                                        "raw_text": value,
+                                        "count": count,
+                                        "diameter": diameter,
+                                        "length_cm": length
+                                    })
+                                except:
+                                    continue # Sayı çevirme hatası olursa atla
 
             return extracted_data
+
         except Exception as e:
-            return {"error": str(e)}
+            return {"error": f"Stream okuma hatası: {str(e)}"}
 
 class MaterialCalculator:
     def __init__(self):
@@ -94,9 +118,12 @@ class MaterialCalculator:
             "okunan_veri_sayisi": len(parsed_data)
         }
 
-# --- CLOUDCONVERT (Düzeltildi) ---
+# ==========================================
+# ☁️ CLOUDCONVERT (Düzeltildi: Engine Kaldırıldı)
+# ==========================================
 def convert_dwg_to_dxf(input_path):
     try:
+        # Hata veren 'engine' parametresini kaldırdık
         job = cloudconvert.Job.create(payload={
             "tasks": {
                 "upload-file": {
@@ -106,7 +133,6 @@ def convert_dwg_to_dxf(input_path):
                     "operation": "convert",
                     "input": "upload-file",
                     "output_format": "dxf"
-                    # "engine": "oda" SATIRINI SİLDİK (Otomatik seçsin)
                 },
                 "export-file": {
                     "operation": "export/url",
@@ -134,10 +160,12 @@ def convert_dwg_to_dxf(input_path):
         print("Convert Hatası:", e)
         return None
 
-# --- WEB SUNUCUSU ---
+# ==========================================
+# 🌐 WEB SUNUCUSU
+# ==========================================
 @app.route('/', methods=['GET'])
 def home():
-    return "İnşaat API (Optimize Edildi) Çalışıyor! 🏗️"
+    return "İnşaat API (Ultra Hafif Mod) Çalışıyor! 🏗️"
 
 @app.route('/analiz-et', methods=['POST'])
 def upload_file():
@@ -154,30 +182,37 @@ def upload_file():
     try:
         target_dxf_path = filepath
 
+        # DWG Dönüştürme
         if filename.endswith('.dwg'):
             converted_path = convert_dwg_to_dxf(filepath)
             if converted_path:
                 target_dxf_path = converted_path
             else:
-                return jsonify({'error': 'DWG dönüştürme hatası'}), 500
+                return jsonify({'error': 'DWG dönüştürme başarısız (CloudConvert hatası)'}), 500
 
+        # 1. Veriyi Çıkar (Yeni Stream Yöntemi ile)
         extractor = RebarExtractor()
-        raw_data = extractor.parse_dxf(target_dxf_path)
+        # parse_dxf yerine parse_dxf_stream kullanıyoruz
+        raw_data = extractor.parse_dxf_stream(target_dxf_path)
 
         if isinstance(raw_data, dict) and "error" in raw_data:
             return jsonify(raw_data), 500
 
+        # 2. Hesabı Yap
         calculator = MaterialCalculator()
         result = calculator.calculate_needs(raw_data)
         
         return jsonify(result)
 
+    except Exception as e:
+        return jsonify({'error': f'Genel Hata: {str(e)}'}), 500
+
     finally:
-        # HATA OLSA BİLE DOSYALARI SİL (RAM temizliği için kritik)
+        # TEMİZLİK (Çok Önemli)
         if os.path.exists(filepath): os.remove(filepath)
         if 'target_dxf_path' in locals() and filepath != target_dxf_path and os.path.exists(target_dxf_path):
             os.remove(target_dxf_path)
-        gc.collect() # Hafızayı zorla temizle
+        gc.collect() # RAM'i boşalt
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)
