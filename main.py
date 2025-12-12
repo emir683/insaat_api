@@ -1,5 +1,6 @@
 import os
 import gc
+import json # Loglama için gerekli
 from flask import Flask, request, jsonify
 import ezdxf
 from ezdxf.lldxf import tagger
@@ -21,59 +22,38 @@ cloudconvert.configure(api_key=CLOUDCONVERT_API_KEY)
 # ==========================================
 class RebarExtractor:
     def __init__(self):
-        # Regex: "20 Ø12" veya "Ø14/15" gibi desenleri yakalar
         self.rebar_pattern = re.compile(r'(\d+)\s*[Ø|Q|q|fi]\s*(\d+)(?:\s*L\s*=\s*(\d+))?', re.IGNORECASE)
 
     def parse_dxf_stream(self, file_path):
-        """
-        Dosyayı tamamını RAM'e yüklemeden (Stream) okur.
-        Bu yöntem büyük dosyalarda bile sunucuyu çökertmez.
-        """
         extracted_data = []
-        
         try:
-            # Dosyayı metin akışı olarak aç (Binary değil)
+            # Encoding hatası almamak için errors='ignore' ekledik
             with open(file_path, 'rt', encoding='cp1252', errors='ignore') as fp:
-                # Ezdxf'in düşük seviye tag okuyucusu
                 tag_stream = tagger.low_level_tagger(fp)
-                
                 in_text_entity = False
                 
                 for tag in tag_stream:
-                    code = tag.code
-                    value = tag.value
+                    if tag.code == 0:
+                        in_text_entity = (tag.value == 'TEXT' or tag.value == 'MTEXT')
                     
-                    # 0 Grubu: Obje Başlangıcı (TEXT veya MTEXT mi?)
-                    if code == 0:
-                        if value == 'TEXT' or value == 'MTEXT':
-                            in_text_entity = True
-                        else:
-                            in_text_entity = False
-                    
-                    # 1 Grubu: Metin İçeriği
-                    if in_text_entity and code == 1:
-                        # Regex ile kontrol et
-                        if isinstance(value, str):
-                            match = self.rebar_pattern.search(value)
-                            if match:
-                                try:
-                                    count = int(match.group(1))
-                                    diameter = int(match.group(2))
-                                    # Uzunluk varsa al, yoksa 0
-                                    length = int(match.group(3)) if match.group(3) else 0
-                                    
-                                    extracted_data.append({
-                                        "raw_text": value,
-                                        "count": count,
-                                        "diameter": diameter,
-                                        "length_cm": length
-                                    })
-                                except:
-                                    continue # Sayı çevirme hatası olursa atla
-
+                    if in_text_entity and tag.code == 1 and isinstance(tag.value, str):
+                        match = self.rebar_pattern.search(tag.value)
+                        if match:
+                            try:
+                                count = int(match.group(1))
+                                diameter = int(match.group(2))
+                                length = int(match.group(3)) if match.group(3) else 0
+                                extracted_data.append({
+                                    "raw_text": tag.value,
+                                    "count": count,
+                                    "diameter": diameter,
+                                    "length_cm": length
+                                })
+                            except:
+                                continue
             return extracted_data
-
         except Exception as e:
+            print(f"DXF Okuma Hatası: {e}")
             return {"error": f"Stream okuma hatası: {str(e)}"}
 
 class MaterialCalculator:
@@ -119,45 +99,63 @@ class MaterialCalculator:
         }
 
 # ==========================================
-# ☁️ CLOUDCONVERT (Düzeltildi: Engine Kaldırıldı)
+# ☁️ CLOUDCONVERT (GÜÇLENDİRİLMİŞ VERSİYON)
 # ==========================================
 def convert_dwg_to_dxf(input_path):
     try:
-        # Hata veren 'engine' parametresini kaldırdık
+        print("CloudConvert işlemi başlatılıyor...")
+        
+        # 1. Görevi Oluştur
         job = cloudconvert.Job.create(payload={
+            "tag": "dwg_to_dxf",
             "tasks": {
-                "upload-file": {
+                "import-my-file": {
                     "operation": "import/upload"
                 },
-                "convert-file": {
+                "convert-my-file": {
                     "operation": "convert",
-                    "input": "upload-file",
+                    "input": "import-my-file",
                     "output_format": "dxf"
                 },
-                "export-file": {
+                "export-my-file": {
                     "operation": "export/url",
-                    "input": "convert-file"
+                    "input": "convert-my-file"
                 }
             }
         })
 
-        upload_task = job['tasks'][0]
+        # 2. Dosyayı Yükle
+        upload_task = next(task for task in job['tasks'] if task['name'] == 'import-my-file')
         
         with open(input_path, 'rb') as f:
             cloudconvert.Task.upload(file_name=input_path, task=upload_task)
 
+        # 3. İşlemin Bitmesini Bekle
         job = cloudconvert.Job.wait(id=job['id'])
         
-        export_task = job['tasks'][2]
+        # 4. Hata Kontrolü (ÖNEMLİ KISIM)
+        if job['status'] == 'error':
+            print("CloudConvert Hatası (Job Failed):", json.dumps(job, indent=2))
+            return None
+
+        # 5. İndirme Linkini Bul
+        export_task = next(task for task in job['tasks'] if task['name'] == 'export-my-file')
+        
+        if export_task['status'] != 'finished':
+            print("Export görevi tamamlanamadı:", export_task)
+            return None
+            
         file_url = export_task['result']['files'][0]['url']
         
+        # 6. Dosyayı İndir
         output_filename = input_path + ".dxf"
         cloudconvert.download(filename=output_filename, url=file_url)
         
+        print("Dönüştürme başarılı:", output_filename)
         return output_filename
 
     except Exception as e:
-        print("Convert Hatası:", e)
+        print(f"Convert Hatası Detaylı: {str(e)}")
         return None
 
 # ==========================================
@@ -165,7 +163,7 @@ def convert_dwg_to_dxf(input_path):
 # ==========================================
 @app.route('/', methods=['GET'])
 def home():
-    return "İnşaat API (Ultra Hafif Mod) Çalışıyor! 🏗️"
+    return "İnşaat API (Final Sürüm) Çalışıyor! 🏗️"
 
 @app.route('/analiz-et', methods=['POST'])
 def upload_file():
@@ -175,44 +173,60 @@ def upload_file():
     file = request.files['file']
     filename = file.filename.lower()
     
-    # Geçici dosya yolu
-    filepath = "/tmp/" + file.filename if os.name != 'nt' else file.filename
+    # Render'da /tmp klasörü yazılabilir tek yerdir
+    filepath = os.path.join("/tmp", file.filename)
     file.save(filepath)
 
-    try:
-        target_dxf_path = filepath
+    target_dxf_path = filepath
+    converted_file_created = False
 
+    try:
         # DWG Dönüştürme
         if filename.endswith('.dwg'):
+            print(f"DWG tespit edildi: {filename}")
             converted_path = convert_dwg_to_dxf(filepath)
+            
             if converted_path:
                 target_dxf_path = converted_path
+                converted_file_created = True
             else:
-                return jsonify({'error': 'DWG dönüştürme başarısız (CloudConvert hatası)'}), 500
+                return jsonify({'error': 'DWG dönüştürme hatası. Lütfen geçerli bir DWG yükleyin.'}), 500
 
-        # 1. Veriyi Çıkar (Yeni Stream Yöntemi ile)
+        # Veriyi Çıkar
+        print(f"Analiz ediliyor: {target_dxf_path}")
         extractor = RebarExtractor()
-        # parse_dxf yerine parse_dxf_stream kullanıyoruz
         raw_data = extractor.parse_dxf_stream(target_dxf_path)
 
         if isinstance(raw_data, dict) and "error" in raw_data:
             return jsonify(raw_data), 500
+        
+        # Eğer hiç veri bulunamadıysa uyar
+        if not raw_data:
+             return jsonify({
+                 'error': 'Dosyada okunabilir demir verisi bulunamadı. Lütfen dosyanın metin (text) içerdiğinden emin olun.',
+                 'demir_listesi': {},
+                 'toplam_tonaj_kg': 0
+             }), 200
 
-        # 2. Hesabı Yap
+        # Hesabı Yap
         calculator = MaterialCalculator()
         result = calculator.calculate_needs(raw_data)
         
         return jsonify(result)
 
     except Exception as e:
-        return jsonify({'error': f'Genel Hata: {str(e)}'}), 500
+        print(f"Sunucu Hatası: {e}")
+        return jsonify({'error': f'Sunucu Hatası: {str(e)}'}), 500
 
     finally:
-        # TEMİZLİK (Çok Önemli)
-        if os.path.exists(filepath): os.remove(filepath)
-        if 'target_dxf_path' in locals() and filepath != target_dxf_path and os.path.exists(target_dxf_path):
-            os.remove(target_dxf_path)
-        gc.collect() # RAM'i boşalt
+        # TEMİZLİK
+        try:
+            if os.path.exists(filepath): os.remove(filepath)
+            if converted_file_created and os.path.exists(target_dxf_path):
+                os.remove(target_dxf_path)
+            gc.collect()
+        except:
+            pass
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)
