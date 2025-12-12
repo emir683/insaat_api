@@ -25,42 +25,30 @@ class RebarExtractor:
     def parse_dxf_stream(self, file_path):
         extracted_data = []
         try:
-            # KÜTÜPHANE YERİNE MANUEL OKUMA (Hatasız ve Hızlı)
             with open(file_path, 'r', encoding='cp1252', errors='ignore') as fp:
-                
                 in_text_entity = False
-                
-                # Dosyayı satır satır oku
                 while True:
-                    # DXF Formatı: Bir satır KOD, altındaki satır DEĞER'dir.
                     code_line = fp.readline()
-                    if not code_line: break # Dosya bitti
+                    if not code_line: break
                     value_line = fp.readline()
-                    if not value_line: break # Dosya bitti
+                    if not value_line: break
                     
                     try:
                         code = int(code_line.strip())
                         value = value_line.strip()
                     except:
-                        continue # Okuma hatası olursa geç
+                        continue
 
-                    # Grup Kodu 0: Obje Türü (TEXT mi MTEXT mi?)
                     if code == 0:
-                        if value == 'TEXT' or value == 'MTEXT':
-                            in_text_entity = True
-                        else:
-                            in_text_entity = False
+                        in_text_entity = (value == 'TEXT' or value == 'MTEXT')
                     
-                    # Grup Kodu 1: Metin İçeriği
                     if in_text_entity and code == 1:
-                        # Regex ile demir ara
                         match = self.rebar_pattern.search(value)
                         if match:
                             try:
                                 count = int(match.group(1))
                                 diameter = int(match.group(2))
                                 length = int(match.group(3)) if match.group(3) else 0
-                                
                                 extracted_data.append({
                                     "raw_text": value,
                                     "count": count,
@@ -69,7 +57,6 @@ class RebarExtractor:
                                 })
                             except:
                                 continue
-
             return extracted_data
         except Exception as e:
             print(f"Manuel Okuma Hatası: {e}")
@@ -118,7 +105,7 @@ class MaterialCalculator:
         }
 
 # ==========================================
-# ☁️ CLOUDCONVERT (SAĞLAM)
+# ☁️ CLOUDCONVERT (DÜZELTİLMİŞ)
 # ==========================================
 def convert_dwg_to_dxf(input_path):
     try:
@@ -142,18 +129,43 @@ def convert_dwg_to_dxf(input_path):
             }
         })
 
-        upload_task = next(task for task in job['tasks'] if task['name'] == 'import-my-file')
+        # --- DÜZELTME BURADA ---
+        # Gelen cevabın yapısını kontrol ediyoruz
+        print("Job Oluşturuldu, Cevap:", json.dumps(job, indent=2)) # Loglarda görelim
+
+        # Bazen cevap 'data' anahtarının içinde gelir
+        job_data = job
+        if 'data' in job and 'tasks' not in job:
+            job_data = job['data']
+        
+        if 'tasks' not in job_data:
+            print("HATA: CloudConvert cevabında 'tasks' bulunamadı!")
+            return None
+
+        # Görevleri al
+        upload_task = next(task for task in job_data['tasks'] if task['name'] == 'import-my-file')
         
         with open(input_path, 'rb') as f:
             cloudconvert.Task.upload(file_name=input_path, task=upload_task)
 
-        job = cloudconvert.Job.wait(id=job['id'])
+        # Bekle
+        job = cloudconvert.Job.wait(id=job_data['id'])
         
-        if job['status'] == 'error':
-            print("CloudConvert Hatası:", json.dumps(job, indent=2))
+        # Bekleme sonrası cevap yapısını tekrar kontrol et
+        job_data = job
+        if 'data' in job and 'tasks' not in job:
+            job_data = job['data']
+
+        if job_data['status'] == 'error':
+            print("CloudConvert Hatası:", json.dumps(job_data, indent=2))
             return None
 
-        export_task = next(task for task in job['tasks'] if task['name'] == 'export-my-file')
+        export_task = next(task for task in job_data['tasks'] if task['name'] == 'export-my-file')
+        
+        if export_task['status'] != 'finished':
+            print("Export bitmedi:", export_task)
+            return None
+
         file_url = export_task['result']['files'][0]['url']
         
         output_filename = input_path + ".dxf"
@@ -171,7 +183,7 @@ def convert_dwg_to_dxf(input_path):
 # ==========================================
 @app.route('/', methods=['GET'])
 def home():
-    return "İnşaat API (Manuel Okuyucu) Çalışıyor! 🏗️"
+    return "İnşaat API (CloudConvert Fix) Çalışıyor! 🏗️"
 
 @app.route('/analiz-et', methods=['POST'])
 def upload_file():
@@ -195,9 +207,9 @@ def upload_file():
                 target_dxf_path = converted_path
                 converted_file_created = True
             else:
-                return jsonify({'error': 'DWG dönüştürme başarısız.'}), 500
+                return jsonify({'error': 'DWG dönüştürme başarısız (Loglara bakınız).'}), 500
 
-        # Veriyi Çıkar (Yeni Manuel Yöntem)
+        # Veriyi Çıkar
         print(f"Analiz ediliyor: {target_dxf_path}")
         extractor = RebarExtractor()
         raw_data = extractor.parse_dxf_stream(target_dxf_path)
@@ -207,7 +219,7 @@ def upload_file():
         
         if not raw_data:
              return jsonify({
-                 'error': 'Dosyada okunabilir demir verisi bulunamadı. AutoCAD dosyasında TEXT/MTEXT olduğundan emin olun.',
+                 'error': 'Dosyada okunabilir demir verisi bulunamadı.',
                  'demir_listesi': {},
                  'toplam_tonaj_kg': 0
              }), 200
