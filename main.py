@@ -13,8 +13,10 @@ app = Flask(__name__)
 # ==========================================
 # 🔑 AYARLAR
 # ==========================================
-CLOUDCONVERT_API_KEY = "BURAYA_API_KEYINI_YAPISTIR".strip()
+CLOUDCONVERT_API_KEY = """
+eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJhdWQiOiIxIiwianRpIjoiMTc1NTNjODEwNDAxYmRlZWU2ODZlMWViZDIyODVhYWY4Y2YwYzZmZTczMTQ0YTFmYzk2NGI4MWQ4MTM1MDY3Yzk4YmFlNmE2N2U4ZDUwOGMiLCJpYXQiOjE3NjU1NTg0NDYuODQzNjIxLCJuYmYiOjE3NjU1NTg0NDYuODQzNjIyLCJleHAiOjQ5MjEyMzIwNDYuODM5NTY0LCJzdWIiOiI3MzcxNzA2MyIsInNjb3BlcyI6WyJ1c2VyLnJlYWQiLCJ1c2VyLndyaXRlIiwidGFzay5yZWFkIiwidGFzay53cml0ZSJdfQ.Ot3krRvghGyEInTmF5SpjD_hszWHuMhYjTnhmQXVoGsZTYyXzwfnJGlbQv0BzTZpG6mGrED_yufHrtLctZQVUUeQVkElyEIMkcFys-uKt8EHnFHof9rMFL5JpGLzOr_3bunUeB8AtSXjeJae0Boj81ZOgZBJ8zV79_13rHhIN0vdxJ5BkffDcorxFGzImjJnSPT5lEEmA0Wce9XtvE1JGvFnZ3EIo9ag86vjTadANq_qsrjMWMYuisaRz6xTeOfcutnYaFQdheFFBSDhb-kDbogZsL4GjjlGszechORtjdqQoqX1IC4sDKS0mFt9Tk48rVKBBPsJTsukpETtLxjqoTBN4xE6k0dghc3sH6XnpGOLuzZTakrCSqQqjY1D29IbyGqowLD9xs6wldX-Lk80yhdZJ486QmwcwZee3hD9zYSIEXg1BOhESMzEau_qEcuEB4g1exYBhgpqvU3nV0EvH1gdcM-keK3qi7RG0mWyDJSNrgozvPH-1CdZ4ruibhcXGCvo2JF50H6q-5MdZ0L0SPMeLyhb679BaGKxPY33ta4zFkLkeObPS_rSZtupKyI4JmDzGBbfq6yqKPP0hVfT03Mv5ir_W7io_loD3DRV4rSalzIou1dtJttJICbI4PXyQttKNQmdxAMjA2fruO1Vl0-W4P30LbIQRZv55Ev0Qks
 
+""".strip()
 cloudconvert.configure(api_key=CLOUDCONVERT_API_KEY)
 
 # ==========================================
