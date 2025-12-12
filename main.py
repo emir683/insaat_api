@@ -1,9 +1,11 @@
 import os
 import gc
 import json
-from flask import Flask, request, jsonify
 import re
 import math
+import unicodedata
+from flask import Flask, request, jsonify
+from ezdxf.lldxf import tagger
 import cloudconvert
 
 app = Flask(__name__)
@@ -11,49 +13,57 @@ app = Flask(__name__)
 # ==========================================
 # 🔑 AYARLAR
 # ==========================================
-# BURAYA ANAHTARI YAPIŞTIR (Sonuna .strip() ekledim, boşlukları siler)
-CLOUDCONVERT_API_KEY = """
-eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJhdWQiOiIxIiwianRpIjoiMTc1NTNjODEwNDAxYmRlZWU2ODZlMWViZDIyODVhYWY4Y2YwYzZmZTczMTQ0YTFmYzk2NGI4MWQ4MTM1MDY3Yzk4YmFlNmE2N2U4ZDUwOGMiLCJpYXQiOjE3NjU1NTg0NDYuODQzNjIxLCJuYmYiOjE3NjU1NTg0NDYuODQzNjIyLCJleHAiOjQ5MjEyMzIwNDYuODM5NTY0LCJzdWIiOiI3MzcxNzA2MyIsInNjb3BlcyI6WyJ1c2VyLnJlYWQiLCJ1c2VyLndyaXRlIiwidGFzay5yZWFkIiwidGFzay53cml0ZSJdfQ.Ot3krRvghGyEInTmF5SpjD_hszWHuMhYjTnhmQXVoGsZTYyXzwfnJGlbQv0BzTZpG6mGrED_yufHrtLctZQVUUeQVkElyEIMkcFys-uKt8EHnFHof9rMFL5JpGLzOr_3bunUeB8AtSXjeJae0Boj81ZOgZBJ8zV79_13rHhIN0vdxJ5BkffDcorxFGzImjJnSPT5lEEmA0Wce9XtvE1JGvFnZ3EIo9ag86vjTadANq_qsrjMWMYuisaRz6xTeOfcutnYaFQdheFFBSDhb-kDbogZsL4GjjlGszechORtjdqQoqX1IC4sDKS0mFt9Tk48rVKBBPsJTsukpETtLxjqoTBN4xE6k0dghc3sH6XnpGOLuzZTakrCSqQqjY1D29IbyGqowLD9xs6wldX-Lk80yhdZJ486QmwcwZee3hD9zYSIEXg1BOhESMzEau_qEcuEB4g1exYBhgpqvU3nV0EvH1gdcM-keK3qi7RG0mWyDJSNrgozvPH-1CdZ4ruibhcXGCvo2JF50H6q-5MdZ0L0SPMeLyhb679BaGKxPY33ta4zFkLkeObPS_rSZtupKyI4JmDzGBbfq6yqKPP0hVfT03Mv5ir_W7io_loD3DRV4rSalzIou1dtJttJICbI4PXyQttKNQmdxAMjA2fruO1Vl0-W4P30LbIQRZv55Ev0Qks
-
-""".strip()
+CLOUDCONVERT_API_KEY = "BURAYA_API_KEYINI_YAPISTIR".strip()
 
 cloudconvert.configure(api_key=CLOUDCONVERT_API_KEY)
+
 # ==========================================
-# 🏗️ HESAPLAMA MOTORU (Manuel Okuma Modu)
+# 🧹 DOSYA ADI TEMİZLEYİCİ
+# ==========================================
+def secure_filename(filename):
+    """Dosya adındaki Türkçe karakterleri ve boşlukları temizler."""
+    filename = unicodedata.normalize('NFKD', filename).encode('ascii', 'ignore').decode('ascii')
+    filename = re.sub(r'[^\w\s.-]', '', filename).strip().lower()
+    return re.sub(r'[-\s]+', '_', filename)
+
+# ==========================================
+# 🏗️ HESAPLAMA MOTORU (Genişletilmiş Regex)
 # ==========================================
 class RebarExtractor:
     def __init__(self):
-        self.rebar_pattern = re.compile(r'(\d+)\s*[Ø|Q|q|fi]\s*(\d+)(?:\s*L\s*=\s*(\d+))?', re.IGNORECASE)
+        # YENİ REGEX: Daha esnek.
+        # Örnekler: "20 Ø12", "20Q12", "20fi12", "20-Q-12", "20 adet Q12"
+        # L=150, L:150, Boy=150 gibi uzunlukları da yakalar.
+        self.rebar_pattern = re.compile(
+            r'(\d+)\s*(?:adet|ad)?\s*[xX*-]?\s*[Ø|Q|q|fi|FI|Fi|N]\s*[-]?\s*(\d+)(?:\s*(?:L|l|Boy|boy)[=:]?\s*(\d+))?', 
+            re.IGNORECASE
+        )
 
     def parse_dxf_stream(self, file_path):
         extracted_data = []
         try:
             with open(file_path, 'r', encoding='cp1252', errors='ignore') as fp:
+                tag_stream = tagger.low_level_tagger(fp)
                 in_text_entity = False
-                while True:
-                    code_line = fp.readline()
-                    if not code_line: break
-                    value_line = fp.readline()
-                    if not value_line: break
+                
+                for tag in tag_stream:
+                    if tag.code == 0:
+                        in_text_entity = (tag.value == 'TEXT' or tag.value == 'MTEXT')
                     
-                    try:
-                        code = int(code_line.strip())
-                        value = value_line.strip()
-                    except:
-                        continue
-
-                    if code == 0:
-                        in_text_entity = (value == 'TEXT' or value == 'MTEXT')
-                    
-                    if in_text_entity and code == 1:
-                        match = self.rebar_pattern.search(value)
+                    if in_text_entity and tag.code == 1 and isinstance(tag.value, str):
+                        # Regex ile ara
+                        match = self.rebar_pattern.search(tag.value)
                         if match:
                             try:
                                 count = int(match.group(1))
                                 diameter = int(match.group(2))
+                                # Eğer çap çok büyükse (örn: 2023 gibi yıl sanılmışsa) yoksay
+                                if diameter > 40: continue 
+
                                 length = int(match.group(3)) if match.group(3) else 0
+                                
                                 extracted_data.append({
-                                    "raw_text": value,
+                                    "raw_text": tag.value,
                                     "count": count,
                                     "diameter": diameter,
                                     "length_cm": length
@@ -62,12 +72,12 @@ class RebarExtractor:
                                 continue
             return extracted_data
         except Exception as e:
-            print(f"Manuel Okuma Hatası: {e}")
-            return {"error": f"Dosya okuma hatası: {str(e)}"}
+            print(f"DXF Okuma Hatası: {e}")
+            return {"error": f"Okuma hatası: {str(e)}"}
 
 class MaterialCalculator:
     def __init__(self):
-        self.unit_weights = {8: 0.395, 10: 0.617, 12: 0.888, 14: 1.208, 16: 1.580, 18: 2.000, 20: 2.470}
+        self.unit_weights = {8: 0.395, 10: 0.617, 12: 0.888, 14: 1.208, 16: 1.580, 18: 2.000, 20: 2.470, 22: 2.980, 24: 3.550, 26: 4.170, 28: 4.830, 32: 6.310}
         self.stock_bar_length_m = 12.0 
 
     def calculate_needs(self, parsed_data):
@@ -79,8 +89,10 @@ class MaterialCalculator:
             
             if diameter not in self.unit_weights: continue
 
-            length_m = length_cm / 100.0
-            total_item_length_m = length_m * count
+            # Eğer uzunluk yoksa varsayılan 1 metre al (Tonaj 0 çıkmasın diye)
+            calc_length_m = (length_cm / 100.0) if length_cm > 0 else 1.0
+            
+            total_item_length_m = calc_length_m * count
 
             if diameter not in summary: summary[diameter] = {"total_length_m": 0.0}
             summary[diameter]["total_length_m"] += total_item_length_m
@@ -94,7 +106,7 @@ class MaterialCalculator:
             weight_kg = total_len * unit_w
             stock_bars = math.ceil(total_len / self.stock_bar_length_m)
 
-            final_report[f"Q{dia}"] = {
+            final_report[f"Ø{dia}"] = {
                 "toplam_agirlik_kg": round(weight_kg, 2),
                 "toplam_metraj_m": round(total_len, 2),
                 "gerekli_cubuk_adet": stock_bars
@@ -110,9 +122,9 @@ class MaterialCalculator:
 # ==========================================
 # ☁️ CLOUDCONVERT (SAĞLAM)
 # ==========================================
-def convert_dwg_to_dxf(input_path):
+def convert_dwg_to_dxf(input_path, original_filename):
     try:
-        print("CloudConvert işlemi başlatılıyor...")
+        print(f"CloudConvert işlemi başlatılıyor: {original_filename}")
         
         job = cloudconvert.Job.create(payload={
             "tag": "dwg_to_dxf",
@@ -132,10 +144,7 @@ def convert_dwg_to_dxf(input_path):
             }
         })
 
-        # --- DÜZELTME: Cevap Yapısını Kontrol Et ---
-        job_data = job
-        if 'data' in job and 'tasks' not in job:
-            job_data = job['data']
+        job_data = job['data'] if 'data' in job else job
         
         if 'tasks' not in job_data:
             print("HATA: 'tasks' bulunamadı. Cevap:", job_data)
@@ -143,15 +152,12 @@ def convert_dwg_to_dxf(input_path):
 
         upload_task = next(task for task in job_data['tasks'] if task['name'] == 'import-my-file')
         
+        # Dosya adını CloudConvert'e de temiz gönderiyoruz
         with open(input_path, 'rb') as f:
-            cloudconvert.Task.upload(file_name=input_path, task=upload_task)
+            cloudconvert.Task.upload(file_name=original_filename, task=upload_task, file=f)
 
         job = cloudconvert.Job.wait(id=job_data['id'])
-        
-        # Bekleme sonrası tekrar kontrol
-        job_data = job
-        if 'data' in job and 'tasks' not in job:
-            job_data = job['data']
+        job_data = job['data'] if 'data' in job else job
 
         if job_data['status'] == 'error':
             print("CloudConvert Hatası:", json.dumps(job_data, indent=2))
@@ -175,7 +181,7 @@ def convert_dwg_to_dxf(input_path):
 # ==========================================
 @app.route('/', methods=['GET'])
 def home():
-    return "İnşaat API (Boşluk Temizlendi) Çalışıyor! 🏗️"
+    return "İnşaat API (v4 - Türkçe Karakter Fix) Çalışıyor! 🏗️"
 
 @app.route('/analiz-et', methods=['POST'])
 def upload_file():
@@ -183,22 +189,25 @@ def upload_file():
         return jsonify({'error': 'Dosya bulunamadı'}), 400
     
     file = request.files['file']
-    filename = file.filename.lower()
-    filepath = os.path.join("/tmp", file.filename)
+    
+    # DOSYA ADINI TEMİZLE (Türkçe karakterleri at)
+    clean_name = secure_filename(file.filename)
+    filepath = os.path.join("/tmp", clean_name)
     file.save(filepath)
 
     target_dxf_path = filepath
     converted_file_created = False
 
     try:
-        if filename.endswith('.dwg'):
-            print(f"DWG tespit edildi: {filename}")
-            converted_path = convert_dwg_to_dxf(filepath)
+        if clean_name.endswith('.dwg'):
+            print(f"DWG tespit edildi: {clean_name}")
+            # Orijinal dosya adını temizlenmiş haliyle gönderiyoruz
+            converted_path = convert_dwg_to_dxf(filepath, clean_name)
             if converted_path:
                 target_dxf_path = converted_path
                 converted_file_created = True
             else:
-                return jsonify({'error': 'DWG dönüştürme başarısız.'}), 500
+                return jsonify({'error': 'DWG dönüştürülemedi. Dosya bozuk veya desteklenmeyen format.'}), 500
 
         print(f"Analiz ediliyor: {target_dxf_path}")
         extractor = RebarExtractor()
@@ -207,9 +216,10 @@ def upload_file():
         if isinstance(raw_data, dict) and "error" in raw_data:
             return jsonify(raw_data), 500
         
+        # Eğer veri yoksa, kullanıcıya "Metin bulamadım" uyarısı dön
         if not raw_data:
              return jsonify({
-                 'error': 'Dosyada okunabilir demir verisi bulunamadı.',
+                 'error': 'Dosya okundu ancak demir verisi tespit edilemedi. Projenin "Text" veya "MText" formatında yazılar içerdiğinden emin olun. (Block veya Attribute verileri okunamaz)',
                  'demir_listesi': {},
                  'toplam_tonaj_kg': 0
              }), 200
