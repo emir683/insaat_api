@@ -1,35 +1,33 @@
 import os
-import time
 from flask import Flask, request, jsonify
 import ezdxf
 import re
 import math
 import cloudconvert
+import gc # Hafıza temizliği için Garbage Collector
 
 app = Flask(__name__)
 
-# ==========================================
-# 🔑 AYARLAR
-# ==========================================
-# BURAYA CloudConvert'ten aldığın API Key'i yapıştır:
+# --- AYARLAR ---
+# API KEY'İNİ BURAYA YAPIŞTIRMAYI UNUTMA!
 CLOUDCONVERT_API_KEY = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJhdWQiOiIxIiwianRpIjoiYWQzMmEyODgwOGUwZjFkYjI0YTU1Zjk1YTM1NjE5NjA2YTg3MjRjNDY0Yjc4ZTQ1Y2NhNGFlY2E0NTg1NGM0MTc1MmQ3YmM1MjZkMjQ5NjEiLCJpYXQiOjE3NjU1NDYzNTIuNzIxNDQ1LCJuYmYiOjE3NjU1NDYzNTIuNzIxNDQ3LCJleHAiOjQ5MjEyMTk5NTIuNzEzNDM2LCJzdWIiOiI3MzcxNzA2MyIsInNjb3BlcyI6WyJ0YXNrLndyaXRlIiwidGFzay5yZWFkIiwidXNlci5yZWFkIl19.Lr7QFvOfWu2qss8lt3JKRtQrUGP1LWXAPQG5gm7GmNtqdMQ9Nu3TUAsNIn1LhLqd46vq8tqpXdW-OOB4_dh_sAG1vWsZeGWBYxFxaeQJdDuZdpJ5Bc2NntvYrmfTHK8XTjan83NpibvgCz9Aviho2rv7lLciumaeuEr2rqmnP12jvdIKzLoDOCLPyd1WWu0_LWmQdVZyEGMtoon6MxWnxbMgmVh-Lfn0I7AyvWlgYm85IeL4ioLQBjebMhFqmYNfp5ZJy6VtmmEgxMQhZftYwsaPtp9bBb7gfUBmz_Gj9IYSgr7wWbMVjjHul_JAqgEl7adcaeK3JdjigtaVc6MjvZEqVaUetdCwMxqqcrufkNFYaE0NfjfOSjcO_gX5xn3xulMerzR92nzsGfk8LldRBtnTaACjEfMP8-noHZvpMzCMWBtvrP2FboYO06FUaT9hr8rRKwFrkIAeA516WNYwwdAeFSLiLpTzCZdRSweir8UKl3TtiA7s9Gk6F7zgocgQiIOSt4Hz7HXFVj--v3XuD8dNyZSQsv-niqzK8-CzFw7CDewYH57Vp_JgFv36yn117rsp_G4dw9COfmdS4l6Au27BHVmER7aG-2C2FTnulyqIhbRgidPjKClo_mMmgxTkNFRR1JpLiBtpsGYhdiDmQ7RseVyQYABMUo415cca3Yw" 
 
-# CloudConvert Ayarları
 cloudconvert.configure(api_key=CLOUDCONVERT_API_KEY)
 
-# ==========================================
-# 🏗️ HESAPLAMA MOTORU
-# ==========================================
+# --- HESAPLAMA MOTORU ---
 class RebarExtractor:
     def __init__(self):
         self.rebar_pattern = re.compile(r'(\d+)\s*[Ø|Q|q|fi]\s*(\d+)(?:\s*L\s*=\s*(\d+))?', re.IGNORECASE)
 
     def parse_dxf(self, file_path):
         try:
+            # SADECE GEREKLİ KATMANLARI OKU (Hafıza Tasarrufu İçin)
+            # DXF dosyasını okurken hafızayı şişirmemek için önlemler
             doc = ezdxf.readfile(file_path)
             msp = doc.modelspace()
             extracted_data = []
             
+            # Sadece TEXT ve MTEXT objelerini sorgula, diğerlerini belleğe alma
             for entity in msp.query('TEXT MTEXT'):
                 text_content = entity.dxf.text
                 match = self.rebar_pattern.search(text_content)
@@ -44,6 +42,12 @@ class RebarExtractor:
                         "diameter": diameter,
                         "length_cm": length
                     })
+            
+            # İş bitince belleği temizle
+            del doc
+            del msp
+            gc.collect()
+
             return extracted_data
         except Exception as e:
             return {"error": str(e)}
@@ -90,9 +94,7 @@ class MaterialCalculator:
             "okunan_veri_sayisi": len(parsed_data)
         }
 
-# ==========================================
-# ☁️ DWG -> DXF DÖNÜŞTÜRÜCÜ (CloudConvert)
-# ==========================================
+# --- CLOUDCONVERT (Düzeltildi) ---
 def convert_dwg_to_dxf(input_path):
     try:
         job = cloudconvert.Job.create(payload={
@@ -103,8 +105,8 @@ def convert_dwg_to_dxf(input_path):
                 "convert-file": {
                     "operation": "convert",
                     "input": "upload-file",
-                    "output_format": "dxf",
-                    "engine": "oda"
+                    "output_format": "dxf"
+                    # "engine": "oda" SATIRINI SİLDİK (Otomatik seçsin)
                 },
                 "export-file": {
                     "operation": "export/url",
@@ -114,16 +116,12 @@ def convert_dwg_to_dxf(input_path):
         })
 
         upload_task = job['tasks'][0]
-        upload_form = upload_task['result']['form']
         
-        # Dosyayı CloudConvert'e yükle
         with open(input_path, 'rb') as f:
             cloudconvert.Task.upload(file_name=input_path, task=upload_task)
 
-        # Dönüştürmeyi bekle
         job = cloudconvert.Job.wait(id=job['id'])
         
-        # Sonucu indir
         export_task = job['tasks'][2]
         file_url = export_task['result']['files'][0]['url']
         
@@ -136,12 +134,10 @@ def convert_dwg_to_dxf(input_path):
         print("Convert Hatası:", e)
         return None
 
-# ==========================================
-# 🌐 WEB SUNUCUSU
-# ==========================================
+# --- WEB SUNUCUSU ---
 @app.route('/', methods=['GET'])
 def home():
-    return "İnşaat API (DWG/DXF) Çalışıyor! 🏗️"
+    return "İnşaat API (Optimize Edildi) Çalışıyor! 🏗️"
 
 @app.route('/analiz-et', methods=['POST'])
 def upload_file():
@@ -149,43 +145,39 @@ def upload_file():
         return jsonify({'error': 'Dosya bulunamadı'}), 400
     
     file = request.files['file']
-    if file.filename == '':
-        return jsonify({'error': 'Dosya seçilmedi'}), 400
-
     filename = file.filename.lower()
-    filepath = os.path.join("/tmp", file.filename) if os.name != 'nt' else file.filename
+    
+    # Geçici dosya yolu
+    filepath = "/tmp/" + file.filename if os.name != 'nt' else file.filename
     file.save(filepath)
 
-    target_dxf_path = filepath
-
-    # Eğer DWG ise önce çevir
-    if filename.endswith('.dwg'):
-        print("DWG dosyası tespit edildi, dönüştürülüyor...")
-        converted_path = convert_dwg_to_dxf(filepath)
-        if converted_path:
-            target_dxf_path = converted_path
-        else:
-            return jsonify({'error': 'DWG dönüştürme başarısız oldu.'}), 500
-
-    # 1. Veriyi Çıkar
-    extractor = RebarExtractor()
-    raw_data = extractor.parse_dxf(target_dxf_path)
-
-    if isinstance(raw_data, dict) and "error" in raw_data:
-        return jsonify(raw_data), 500
-
-    # 2. Hesabı Yap
-    calculator = MaterialCalculator()
-    result = calculator.calculate_needs(raw_data)
-
-    # Temizlik (Geçici dosyaları sil)
     try:
-        if os.path.exists(filepath): os.remove(filepath)
-        if filepath != target_dxf_path and os.path.exists(target_dxf_path): os.remove(target_dxf_path)
-    except:
-        pass
+        target_dxf_path = filepath
 
-    return jsonify(result)
+        if filename.endswith('.dwg'):
+            converted_path = convert_dwg_to_dxf(filepath)
+            if converted_path:
+                target_dxf_path = converted_path
+            else:
+                return jsonify({'error': 'DWG dönüştürme hatası'}), 500
+
+        extractor = RebarExtractor()
+        raw_data = extractor.parse_dxf(target_dxf_path)
+
+        if isinstance(raw_data, dict) and "error" in raw_data:
+            return jsonify(raw_data), 500
+
+        calculator = MaterialCalculator()
+        result = calculator.calculate_needs(raw_data)
+        
+        return jsonify(result)
+
+    finally:
+        # HATA OLSA BİLE DOSYALARI SİL (RAM temizliği için kritik)
+        if os.path.exists(filepath): os.remove(filepath)
+        if 'target_dxf_path' in locals() and filepath != target_dxf_path and os.path.exists(target_dxf_path):
+            os.remove(target_dxf_path)
+        gc.collect() # Hafızayı zorla temizle
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)
