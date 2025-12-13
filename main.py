@@ -227,3 +227,56 @@ def home():
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)
+    @app.route('/svg-cevir', methods=['POST'])
+def convert_to_svg():
+    if 'file' not in request.files: return jsonify({'error': 'Dosya yok'}), 400
+    file = request.files['file']
+    filename = secure_filename(file.filename)
+    filepath = os.path.join("/tmp", filename)
+    file.save(filepath)
+
+    try:
+        # CloudConvert ile SVG'ye çevir
+        print(f"SVG Dönüşümü Başlıyor: {filename}")
+        job = cloudconvert.Job.create(payload={
+            "tag": "cad_to_svg",
+            "tasks": {
+                "upload-file": {"operation": "import/upload"},
+                "convert-file": {
+                    "operation": "convert",
+                    "input": "upload-file",
+                    "output_format": "svg", # HEDEF FORMAT SVG
+                    "engine": "cadconverter" # CAD motoru
+                },
+                "export-file": {"operation": "export/url", "input": "convert-file"}
+            }
+        })
+
+        # Dosya Yükleme
+        job_data = job['data']
+        upload_task = next(t for t in job_data['tasks'] if t['name'] == 'upload-file')
+        cloudconvert.Task.upload(file_name=filepath, task=upload_task['id'])
+
+        # Bekle
+        job = cloudconvert.Job.wait(id=job_data['id'])
+        job_data = job['data']
+
+        if job_data['status'] == 'error':
+             return jsonify({'error': 'CloudConvert Hatası'}), 500
+
+        # İndirme Linkini Al
+        export_task = next(t for t in job_data['tasks'] if t['name'] == 'export-file')
+        file_url = export_task['result']['files'][0]['url']
+
+        # SVG'yi indir ve sunucudan sun
+        import requests
+        svg_content = requests.get(file_url).content
+        
+        # Direkt SVG içeriğini (text) döndür
+        return svg_content, 200, {'Content-Type': 'image/svg+xml'}
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if os.path.exists(filepath): os.remove(filepath)
+        gc.collect()
